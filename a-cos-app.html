@@ -688,7 +688,7 @@ async function sha256Hex(str) {
 function loadJSON(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch (e) { return null; } }
 
 var STATE = {
-  apiBase: localStorage.getItem("acos_api_base") || "http://localhost:4000",
+  apiBase: localStorage.getItem("acos_api_base") ||  "https://razor-pay-04cj.onrender.com",
 
   // Auth — a real Dashboard JWT (Authorization: Bearer, for merchant-management
   // calls) and a real Agent API key (x-api-key, for the agent-facing storefront
