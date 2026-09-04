@@ -33,6 +33,7 @@ import { createApproval } from "./approvals";
 import { getIdempotentResult, saveIdempotentResult } from "./idempotency";
 import { findActiveCampaignForSku, recordCampaignRedemption } from "./campaigns";
 import { recordAcceptance } from "./growth";
+import { dispatchEvent } from "./outbound_webhooks";
 
 /* ------------------------------------------------------------------ */
 /* Canonicalization helpers — MUST match whatever the client signed.   */
@@ -460,6 +461,12 @@ export async function bridgeCheckout(
       session,
     };
     await saveIdempotentResult(merchantId, "checkout", idempotencyKey, result);
+    void dispatchEvent(merchantId, "order.blocked", {
+      checkout_session_id: session.checkout_session_id,
+      intent_id: intent.intent_id,
+      cart_total_inr: intent.cart_total_inr,
+      reasons: gate.reasons,
+    });
     return result;
   }
 
@@ -486,6 +493,12 @@ export async function bridgeCheckout(
       reason: `Cart total ₹${intent.cart_total_inr} exceeds the auto-approval threshold — a human must approve this payment before settlement.`,
     };
     await saveIdempotentResult(merchantId, "checkout", idempotencyKey, result);
+    void dispatchEvent(merchantId, "approval.requested", {
+      approval_id: approval.approval_id,
+      checkout_session_id: session.checkout_session_id,
+      amount_inr: intent.cart_total_inr,
+      reason: result.reason,
+    });
     return result;
   }
 
@@ -527,6 +540,12 @@ export async function bridgeCheckout(
 
     const result: CheckoutBridgeResult = { status: "ORDER_CREATED", intent, session, razorpay_order: order, audit_id: audit.audit_id };
     await saveIdempotentResult(merchantId, "checkout", idempotencyKey, result);
+    void dispatchEvent(merchantId, "order.created", {
+      checkout_session_id: session.checkout_session_id,
+      razorpay_order_id: (order as any).id,
+      cart_total_inr: intent.cart_total_inr,
+      currency: intent.currency,
+    });
     return result;
   } catch (err: any) {
     await transitionSession(merchantId, session.checkout_session_id, "CANCELLED", "protocol_bridge", `Razorpay order creation failed: ${err?.message ?? String(err)}`);

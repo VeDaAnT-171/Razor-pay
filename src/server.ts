@@ -58,6 +58,7 @@ import { listApprovals, resolveApproval } from "./services/approvals";
 import { processRefund, listRefunds } from "./services/refunds";
 import { createPaymentLink, listPaymentLinks } from "./services/payment_links";
 import { processWebhook, listWebhookEvents } from "./services/webhooks";
+import { registerEndpoint, listEndpoints, deleteEndpoint, listRecentDeliveries, sendTestEvent } from "./services/outbound_webhooks";
 import { getPublishedPolicy, getDraftPolicy, saveDraft, publishDraft, getPolicyHistory, getAgentProfile } from "./services/policy_store";
 import { runTestSuite } from "./services/test_lab";
 import { simulateTestPayment } from "./services/dev_tools";
@@ -135,6 +136,91 @@ async function main() {
     if (!result) return reply.status(404).send({ error: "Merchant not found" });
     return { status: "OK", api_key: result.api_key, api_key_prefix: result.api_key_prefix };
   });
+
+  app.patch<{ Body: { name: string } }>("/auth/profile", { preHandler: requireDashboardAuth }, async (request, reply) => {
+    const result = await authService.updateProfile(request.merchantId!, request.body?.name);
+    if (!result.ok) return reply.status(result.httpStatus).send({ error: result.error });
+    return { status: "OK", merchant: result.merchant };
+  });
+
+  app.post<{ Body: { current_password: string; new_password: string } }>(
+    "/auth/change-password",
+    { preHandler: requireDashboardAuth, config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const { current_password, new_password } = request.body ?? ({} as any);
+      const result = await authService.changePassword(request.merchantId!, current_password, new_password);
+      if (!result.ok) return reply.status(result.httpStatus).send({ error: result.error });
+      return { status: "OK" };
+    }
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Outbound webhooks — the merchant's own server, notified on       */
+  /* order.created / order.blocked / approval.requested /             */
+  /* audit.chain_broken (dashboard-authenticated)                     */
+  /* -------------------------------------------------------------- */
+  app.get("/auth/webhooks", { preHandler: requireDashboardAuth }, async (request) => ({
+    endpoints: await listEndpoints(request.merchantId!),
+  }));
+
+  app.post<{ Body: { url: string; events?: string[] } }>(
+    "/auth/webhooks",
+    { preHandler: requireDashboardAuth },
+    async (request, reply) => {
+      const { url, events } = request.body ?? ({} as any);
+      const result = await registerEndpoint(request.merchantId!, url, events);
+      if (!result.ok) return reply.status(400).send({ error: result.error });
+      return reply.status(201).send({ status: "OK", endpoint: result.endpoint, secret: result.secret });
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/auth/webhooks/:id",
+    { preHandler: requireDashboardAuth },
+    async (request, reply) => {
+      const deleted = await deleteEndpoint(request.merchantId!, request.params.id);
+      if (!deleted) return reply.status(404).send({ error: "Endpoint not found" });
+      return { status: "OK" };
+    }
+  );
+
+  app.get("/auth/webhooks/deliveries", { preHandler: requireDashboardAuth }, async (request) => ({
+    deliveries: await listRecentDeliveries(request.merchantId!),
+  }));
+
+  app.post<{ Params: { id: string } }>(
+    "/auth/webhooks/:id/test",
+    { preHandler: requireDashboardAuth },
+    async (request, reply) => {
+      const result = await sendTestEvent(request.merchantId!, request.params.id);
+      if (!result.ok) return reply.status(404).send({ error: result.error });
+      return { status: "OK", success: result.success, status_code: result.status_code, error: result.error };
+    }
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Forgot / reset password (public — no dashboard session yet)      */
+  /* -------------------------------------------------------------- */
+  app.post<{ Body: { email: string } }>(
+    "/auth/forgot-password",
+    { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
+    async (request) => {
+      await authService.requestPasswordReset(request.body?.email);
+      // Deliberately the same response whether or not the email exists.
+      return { status: "OK", message: "If an account exists for that email, a reset link has been sent." };
+    }
+  );
+
+  app.post<{ Body: { token: string; new_password: string } }>(
+    "/auth/reset-password",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const { token, new_password } = request.body ?? ({} as any);
+      const result = await authService.resetPassword(token, new_password);
+      if (!result.ok) return reply.status(result.httpStatus).send({ error: result.error });
+      return { status: "OK" };
+    }
+  );
 
   /* -------------------------------------------------------------- */
   /* Merchant Commerce Profile + AI Transactability Score (dashboard) */

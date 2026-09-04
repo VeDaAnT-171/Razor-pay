@@ -18,6 +18,13 @@
 
 import { randomUUID, createHash } from "crypto";
 import { AuditLogEntry, AuditStep } from "../schema/types";
+import { dispatchEvent } from "./outbound_webhooks";
+
+// Process-lifetime de-dupe: a broken chain is a persistent condition until
+// fixed, and verifyChain() is called on every dashboard page load — without
+// this, one broken chain would fire a webhook on every refresh. We only
+// need to tell the merchant's server once per (merchant, broken entry).
+const notifiedBreaks = new Set<string>();
 import * as repo from "../db/audit";
 import { withKeyLock } from "../utils/mutex";
 
@@ -135,8 +142,17 @@ export async function verifyChain(merchantId: string): Promise<{ valid: boolean;
   const rows = await repo.listAll(merchantId);
   let expectedPrev = GENESIS_HASH;
 
+  const reportBreak = (brokenAt: string) => {
+    const key = `${merchantId}:${brokenAt}`;
+    if (!notifiedBreaks.has(key)) {
+      notifiedBreaks.add(key);
+      void dispatchEvent(merchantId, "audit.chain_broken", { broken_at_audit_id: brokenAt });
+    }
+  };
+
   for (const row of rows) {
     if (row.prevHash !== expectedPrev) {
+      reportBreak(row.id);
       return { valid: false, brokenAt: row.id };
     }
     const payloadForHash = stableStringify({
@@ -151,6 +167,7 @@ export async function verifyChain(merchantId: string): Promise<{ valid: boolean;
       prev_hash: row.prevHash,
     });
     if (sha256(payloadForHash) !== row.hash) {
+      reportBreak(row.id);
       return { valid: false, brokenAt: row.id };
     }
     expectedPrev = row.hash;

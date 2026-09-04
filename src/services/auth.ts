@@ -30,10 +30,14 @@ import {
   findMerchantById,
   findMerchantByApiKeyHash,
   updateMerchantApiKey,
+  updateMerchantName,
+  updateMerchantPassword,
   MerchantRow,
 } from "../db/merchants";
+import { insertResetToken, findValidResetToken, markResetTokenUsed } from "../db/password_reset";
 import { seedMerchantCatalog } from "./catalog";
 import { seedMerchantPolicy } from "./policy_store";
+import { sendMail } from "./mailer";
 
 const JWT_SECRET = () => process.env.JWT_SECRET ?? "dev-only-insecure-secret";
 const JWT_EXPIRES_IN_SEC = () => Number(process.env.JWT_EXPIRES_IN_SEC ?? 604800);
@@ -159,4 +163,89 @@ export async function resolveMerchantByApiKey(rawKey: string | undefined): Promi
   const hash = createHash("sha256").update(rawKey).digest("hex");
   const merchant = await findMerchantByApiKeyHash(hash);
   return merchant ? toPublic(merchant) : undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* Account settings — merchant profile + password                      */
+/* ------------------------------------------------------------------ */
+
+export type ProfileUpdateResult = { ok: true; merchant: PublicMerchant } | { ok: false; httpStatus: number; error: string };
+
+/** Store name only — email is the account's identity key and isn't editable here (would need re-verification in a real product). */
+export async function updateProfile(merchantId: string, name: string): Promise<ProfileUpdateResult> {
+  const trimmed = name?.trim();
+  if (!trimmed) return { ok: false, httpStatus: 400, error: "Store name is required" };
+  if (trimmed.length > 120) return { ok: false, httpStatus: 400, error: "Store name is too long" };
+  const updated = await updateMerchantName(merchantId, trimmed);
+  if (!updated) return { ok: false, httpStatus: 404, error: "Merchant not found" };
+  return { ok: true, merchant: toPublic(updated) };
+}
+
+export type ChangePasswordResult = { ok: true } | { ok: false; httpStatus: number; error: string };
+
+export async function changePassword(merchantId: string, currentPassword: string, newPassword: string): Promise<ChangePasswordResult> {
+  if (!newPassword || newPassword.length < 8) {
+    return { ok: false, httpStatus: 400, error: "New password must be at least 8 characters" };
+  }
+  const merchant = await findMerchantById(merchantId);
+  if (!merchant) return { ok: false, httpStatus: 404, error: "Merchant not found" };
+
+  const valid = await bcrypt.compare(currentPassword ?? "", merchant.passwordHash);
+  if (!valid) return { ok: false, httpStatus: 401, error: "Current password is incorrect" };
+
+  const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS());
+  await updateMerchantPassword(merchantId, passwordHash);
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------------ */
+/* Forgot / reset password                                             */
+/* ------------------------------------------------------------------ */
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Always resolves the same way regardless of whether the email exists —
+ * that's deliberate (never let this endpoint be used to enumerate real
+ * merchant accounts). If the email does belong to a merchant, a real,
+ * single-use, hour-lived token is generated and emailed via
+ * services/mailer.ts (which logs instead of faking delivery when SMTP
+ * isn't configured — see that file's header comment).
+ */
+export async function requestPasswordReset(email: string): Promise<{ ok: true }> {
+  const merchant = await findMerchantByEmail(email ?? "");
+  if (merchant) {
+    const rawToken = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    await insertResetToken({ merchantId: merchant.id, tokenHash, expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS) });
+
+    const base = (process.env.FRONTEND_URL ?? "").replace(/\/+$/, "");
+    const link = base ? `${base}#/reset-password/${rawToken}` : `[FRONTEND_URL is not set on the backend — raw token: ${rawToken}]`;
+
+    await sendMail(
+      merchant.email,
+      "Reset your A-COS password",
+      `A password reset was requested for your A-COS account (${merchant.name}).\n\n` +
+        `Reset it here — this link works once and expires in 1 hour:\n${link}\n\n` +
+        `If you didn't request this, you can ignore this email; your password won't change.`
+    );
+  }
+  return { ok: true };
+}
+
+export type ResetPasswordResult = { ok: true } | { ok: false; httpStatus: number; error: string };
+
+export async function resetPassword(rawToken: string, newPassword: string): Promise<ResetPasswordResult> {
+  if (!rawToken) return { ok: false, httpStatus: 400, error: "Reset token is required" };
+  if (!newPassword || newPassword.length < 8) {
+    return { ok: false, httpStatus: 400, error: "New password must be at least 8 characters" };
+  }
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const row = await findValidResetToken(tokenHash);
+  if (!row) return { ok: false, httpStatus: 400, error: "This reset link is invalid or has expired — request a new one" };
+
+  const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS());
+  await updateMerchantPassword(row.merchantId, passwordHash);
+  await markResetTokenUsed(row.id);
+  return { ok: true };
 }

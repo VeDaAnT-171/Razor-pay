@@ -337,6 +337,67 @@ export const webhookEvents = pgTable(
 );
 
 /* ------------------------------------------------------------------ */
+/* Outbound webhooks                                                    */
+/*                                                                      */
+/* The OPPOSITE direction from webhookEvents above: this merchant's own */
+/* server, registered here, gets a signed HTTP POST from A-COS whenever */
+/* order.created / order.blocked / approval.requested /                 */
+/* audit.chain_broken happens on their tenant. Each endpoint gets its   */
+/* own HMAC secret (shown once, like the agent API key) so the merchant */
+/* can verify X-Acos-Signature on their receiving server.               */
+/* ------------------------------------------------------------------ */
+
+export const outboundWebhookEndpoints = pgTable(
+  "outbound_webhook_endpoints",
+  {
+    id: text("id").primaryKey(),
+    merchantId: text("merchant_id").notNull(),
+    url: text("url").notNull(),
+    /** Stored in retrievable form (never returned by any API after creation) because, unlike a login credential, THIS server must reuse it on every future delivery to sign the HMAC — there is no one-way-hash design that lets a sender re-derive a signature it must produce fresh each time. */
+    secret: text("secret").notNull(),
+    secretPrefix: text("secret_prefix").notNull(),
+    events: jsonb("events").notNull(), // string[] subset of the four planned events
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("outbound_webhook_endpoints_merchant_idx").on(t.merchantId)]
+);
+
+export const outboundWebhookDeliveries = pgTable(
+  "outbound_webhook_deliveries",
+  {
+    id: text("id").primaryKey(),
+    merchantId: text("merchant_id").notNull(),
+    endpointId: text("endpoint_id").notNull(),
+    event: text("event").notNull(),
+    url: text("url").notNull(),
+    success: boolean("success").notNull(),
+    statusCode: integer("status_code"),
+    error: text("error"),
+    payloadSummary: jsonb("payload_summary").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("outbound_webhook_deliveries_merchant_idx").on(t.merchantId),
+    index("outbound_webhook_deliveries_endpoint_idx").on(t.endpointId),
+  ]
+);
+
+export const passwordResetTokens = pgTable(
+  "password_reset_tokens",
+  {
+    id: text("id").primaryKey(),
+    merchantId: text("merchant_id").notNull(),
+    /** SHA-256 hash of the raw token — same pattern as the agent API key; the raw value only ever exists in the emailed link. */
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("password_reset_tokens_merchant_idx").on(t.merchantId)]
+);
+
+/* ------------------------------------------------------------------ */
 /* Growth engine + campaigns                                           */
 /* ------------------------------------------------------------------ */
 

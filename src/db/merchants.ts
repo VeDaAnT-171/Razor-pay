@@ -74,3 +74,19 @@ export async function updateMerchantApiKey(
 export async function listAllMerchants(): Promise<MerchantRow[]> {
   return (await db.select().from(merchants)) as MerchantRow[];
 }
+
+export async function updateMerchantName(merchantId: string, name: string): Promise<MerchantRow | undefined> {
+  const [row] = await db
+    .update(merchants)
+    .set({ name, updatedAt: new Date() })
+    .where(eq(merchants.id, merchantId))
+    .returning();
+  return row as MerchantRow | undefined;
+}
+
+export async function updateMerchantPassword(merchantId: string, passwordHash: string): Promise<void> {
+  await db
+    .update(merchants)
+    .set({ passwordHash, updatedAt: new Date() })
+    .where(eq(merchants.id, merchantId));
+}
