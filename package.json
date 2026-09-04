@@ -1,0 +1,40 @@
+{
+  "name": "razorpay-agentic-commerce-os",
+  "version": "0.1.0",
+  "description": "Razorpay Agentic Commerce OS (A-COS) — protocol bridge for ACP / AP2 / x402 / NPCI UAP agentic checkout, backed by Razorpay Test Mode APIs.",
+  "main": "dist/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "start": "node dist/server.js",
+    "mcp": "ts-node-dev --respawn --transpile-only src/mcp/server.ts",
+    "mcp:build-run": "node dist/mcp/server.js",
+    "db:push": "drizzle-kit push"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^9.4.0",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/rate-limit": "^9.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^4.28.1",
+    "jsonwebtoken": "^9.0.3",
+    "nanoid": "^3.3.7",
+    "pg": "^8.23.0",
+    "razorpay": "^2.9.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^20.14.10",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.10",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.3"
+  }
+}

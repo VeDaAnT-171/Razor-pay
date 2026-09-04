@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: acos
+          POSTGRES_PASSWORD: acos_dev_password
+          POSTGRES_DB: acos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U acos -d acos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://acos:acos_dev_password@localhost:5432/acos?schema=public
+      JWT_SECRET: ci-only-secret-not-for-production-use
+      JWT_EXPIRES_IN_SEC: "604800"
+      BCRYPT_SALT_ROUNDS: "4" # low cost in CI only, to keep the job fast
+      RAZORPAY_WEBHOOK_SECRET: ci-only-secret
+      A_COS_MANDATE_SIGNING_SECRET: ci-only-secret
+      DEFAULT_AUTO_LIMIT_INR: "1500"
+      MAX_AUTO_DISCOUNT_PCT: "10"
+      PORT: "4000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check + build
+        run: npm run build
+
+      - name: Push schema to the CI Postgres instance
+        run: npx drizzle-kit push --force
+
+      - name: Start the server
+        run: |
+          node dist/server.js > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:4000/health > /dev/null; then
+              echo "Server is up."
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "Server never became healthy:"
+          cat server.log
+          exit 1
+
+      - name: Smoke test — signup, auth boundary, agent-key catalog access
+        run: |
+          set -e
+          SIGNUP=$(curl -sf -X POST http://localhost:4000/auth/signup \
+            -H "Content-Type: application/json" \
+            -d '{"name":"CI Smoke Test Co","email":"ci-smoke@example.com","password":"password123"}')
+          echo "$SIGNUP" | node -e '
+            const body = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            if (!body.token || !body.api_key || !body.merchant) { console.error("signup response missing fields", body); process.exit(1); }
+            console.log("signup OK, merchant:", body.merchant.name);
+          '
+          TOKEN=$(echo "$SIGNUP" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).token)')
+          APIKEY=$(echo "$SIGNUP" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).api_key)')
+
+          # Dashboard route without a token must be rejected.
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:4000/agent/v1/store)
+          test "$STATUS" = "401"
+
+          # Dashboard route with the real JWT must succeed.
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:4000/agent/v1/store -H "Authorization: Bearer $TOKEN")
+          test "$STATUS" = "200"
+
+          # Agent-facing catalog route needs the API key, not the JWT.
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:4000/agent/v1/catalog -H "x-api-key: $APIKEY")
+          test "$STATUS" = "200"
+
+          echo "Smoke test passed."
+
+      - name: Run the Test Lab suite against the smoke-test merchant
+        run: |
+          set -e
+          SIGNUP=$(curl -sf -X POST http://localhost:4000/auth/signup \
+            -H "Content-Type: application/json" \
+            -d '{"name":"CI Test Lab Co","email":"ci-testlab@example.com","password":"password123"}')
+          TOKEN=$(echo "$SIGNUP" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).token)')
+          RESULT=$(curl -sf -X POST http://localhost:4000/agent/v1/test-lab/run -H "Authorization: Bearer $TOKEN")
+          echo "$RESULT" | node -e '
+            const body = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const failed = body.results.filter(r => !r.passed);
+            if (failed.length) { console.error("Test Lab failures:", JSON.stringify(failed, null, 2)); process.exit(1); }
+            console.log("Test Lab: " + body.results.length + " scenarios, all passed or correctly skipped (no Razorpay keys in CI).");
+          '
+
+      - name: Verify the audit hash chain for the smoke-test merchant
+        run: |
+          set -e
+          SIGNUP=$(curl -sf -X POST http://localhost:4000/auth/signup \
+            -H "Content-Type: application/json" \
+            -d '{"name":"CI Audit Co","email":"ci-audit@example.com","password":"password123"}')
+          TOKEN=$(echo "$SIGNUP" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).token)')
+          curl -sf -X POST http://localhost:4000/agent/v1/test-lab/run -H "Authorization: Bearer $TOKEN" > /dev/null
+          CHAIN=$(curl -sf http://localhost:4000/agent/v1/audit/verify-chain -H "Authorization: Bearer $TOKEN")
+          echo "$CHAIN" | node -e '
+            const body = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            if (body.valid !== true) { console.error("Audit chain invalid:", body); process.exit(1); }
+            console.log("Audit chain valid.");
+          '
+
+      - name: Stop the server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true

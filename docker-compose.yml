@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: acos
+      POSTGRES_PASSWORD: acos_dev_password
+      POSTGRES_DB: acos
+    ports:
+      - "5432:5432"
+    volumes:
+      - acos_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acos -d acos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: pushes src/db/schema.ts onto Postgres, then exits. Uses the
+  # "build" stage (has drizzle-kit + full devDependencies) rather than the
+  # slim runtime image. Re-run any time the schema changes — `docker compose
+  # run --rm migrate`.
+  migrate:
+    build:
+      context: .
+      target: build
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://acos:acos_dev_password@postgres:5432/acos?schema=public
+    command: ["npx", "drizzle-kit", "push", "--force"]
+
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://acos:acos_dev_password@postgres:5432/acos?schema=public
+      PORT: 4000
+      # Everything below is a placeholder — override in a `.env` file next to
+      # this compose file (docker compose reads it automatically) or in your
+      # deployment platform's secret manager. Never ship real secrets in this
+      # file or commit a filled-in `.env`.
+      JWT_SECRET: ${JWT_SECRET:-change-me-generate-with-openssl-rand-hex-32}
+      JWT_EXPIRES_IN_SEC: ${JWT_EXPIRES_IN_SEC:-604800}
+      BCRYPT_SALT_ROUNDS: ${BCRYPT_SALT_ROUNDS:-12}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-change-me-in-production}
+      A_COS_MANDATE_SIGNING_SECRET: ${A_COS_MANDATE_SIGNING_SECRET:-change-me-in-production}
+      DEFAULT_AUTO_LIMIT_INR: ${DEFAULT_AUTO_LIMIT_INR:-1500}
+      MAX_AUTO_DISCOUNT_PCT: ${MAX_AUTO_DISCOUNT_PCT:-10}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+
+volumes:
+  acos_pg_data:
