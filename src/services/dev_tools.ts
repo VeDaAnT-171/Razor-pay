@@ -21,6 +21,7 @@
 
 import { getSession, transitionSession } from "./checkout_session";
 import { writeAudit } from "./audit_log";
+import { consumeHoldsForSession, releaseHoldsForSession } from "./inventory";
 
 export async function simulateTestPayment(
   merchantId: string,
@@ -42,6 +43,7 @@ export async function simulateTestPayment(
 
   if (outcome === "fail") {
     const updated = await transitionSession(merchantId, sessionId, "PAYMENT_FAILED", "dev_tools:simulate", "SIMULATED payment failure", { payment_status: "FAILED" });
+    await releaseHoldsForSession(merchantId, sessionId, "SIMULATED payment failed — released held stock back to the pool", session.intent_id);
     await writeAudit(merchantId, {
       intent_id: session.intent_id, step: "SIMULATED_PAYMENT_EVENT", outcome: "FAIL", actor: "dev_tools:simulate",
       reason: "SIMULATED payment failed — no real money was ever at risk.", detail: { checkout_session_id: sessionId },
@@ -53,6 +55,7 @@ export async function simulateTestPayment(
   await transitionSession(merchantId, sessionId, "PAYMENT_CAPTURED", "dev_tools:simulate", "SIMULATED payment captured — NOT real Razorpay money movement",
     { payment_status: "CAPTURED", razorpay_payment_id: `pay_SIMULATED_${sessionId.slice(3, 11)}` });
   const paid = await transitionSession(merchantId, sessionId, "ORDER_PAID", "dev_tools:simulate", "SIMULATED — order marked paid", { order_status: "PAID" });
+  await consumeHoldsForSession(merchantId, sessionId, session.intent_id);
 
   await writeAudit(merchantId, {
     intent_id: session.intent_id, step: "SIMULATED_PAYMENT_EVENT", outcome: "PASS", actor: "dev_tools:simulate",

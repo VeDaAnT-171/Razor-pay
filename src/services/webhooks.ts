@@ -34,6 +34,7 @@
 import { createHmac, timingSafeEqual, createHash } from "crypto";
 import { writeAudit } from "./audit_log";
 import { transitionSession } from "./checkout_session";
+import { consumeHoldsForSession } from "./inventory";
 import * as sessionsRepo from "../db/sessions";
 import * as repo from "../db/webhooks";
 
@@ -158,6 +159,7 @@ export async function processWebhook(
             "payment.captured webhook verified", { payment_status: "CAPTURED", razorpay_payment_id: paymentId });
           await transitionSession(merchantId, sessionRow.id, "ORDER_PAID", "webhooks",
             "Order marked paid following captured payment", { order_status: "PAID" });
+          await consumeHoldsForSession(merchantId, sessionRow.id, sessionRow.intentId);
           handlerResult = "payment captured — order marked paid";
           const a = await writeAudit(merchantId, {
             intent_id: sessionRow.intentId, step: "PAYMENT_CAPTURED", outcome: "PASS", actor: "webhooks",

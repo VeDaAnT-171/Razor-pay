@@ -17,6 +17,7 @@
 import { Product } from "../data/catalog";
 import { listCatalog, findProduct, searchCatalog as searchCatalogService, SearchCatalogArgs } from "./catalog";
 import { issueQuote, Quote } from "./quote_store";
+import { getAvailableQuantity } from "./inventory";
 
 export { SearchCatalogArgs };
 
@@ -67,10 +68,14 @@ export interface InventoryResult {
 export async function checkInventory(merchantId: string, sku: string, requestedQty = 1): Promise<InventoryResult | { error: string }> {
   const product = await findProduct(merchantId, sku);
   if (!product) return { error: `Unknown SKU: ${sku}` };
+  // Real availability, not raw stock: units already held by an in-flight
+  // checkout (see services/inventory.ts) aren't sellable again until that
+  // hold is released or consumed.
+  const available = await getAvailableQuantity(merchantId, sku);
   return {
     sku: product.sku,
-    in_stock: product.inventory_count >= requestedQty,
-    available_quantity: product.inventory_count,
+    in_stock: available >= requestedQty,
+    available_quantity: available,
   };
 }
 

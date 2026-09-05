@@ -33,6 +33,7 @@ import { createApproval } from "./approvals";
 import { getIdempotentResult, saveIdempotentResult } from "./idempotency";
 import { findActiveCampaignForSku, recordCampaignRedemption } from "./campaigns";
 import { recordAcceptance } from "./growth";
+import { placeHoldsForCart, releaseHoldsForSession, DEFAULT_HOLD_TTL_SEC } from "./inventory";
 import { dispatchEvent } from "./outbound_webhooks";
 
 /* ------------------------------------------------------------------ */
@@ -448,11 +449,38 @@ export async function bridgeCheckout(
   await transitionSession(merchantId, session.checkout_session_id, "AUTHORIZED", "protocol_bridge", "Mandate/authorization accepted");
   await transitionSession(merchantId, session.checkout_session_id, "QUOTE_VALIDATED", "protocol_bridge", "Line-item prices accepted as current quote");
 
+  // Reserve real stock the moment this checkout is a serious, quote-
+  // validated commitment to buy — before it's ever put in front of the
+  // settlement rail. Either every line item is reservable right now, or
+  // the checkout is refused before Razorpay is ever touched (see
+  // services/inventory.ts for the reservation-hold model).
+  const holdResult = await placeHoldsForCart(
+    merchantId,
+    session.checkout_session_id,
+    intent.intent_id,
+    intent.line_items.map((li) => ({ sku: li.sku, quantity: li.quantity })),
+    DEFAULT_HOLD_TTL_SEC
+  );
+  if (!holdResult.ok) {
+    await transitionSession(merchantId, session.checkout_session_id, "BLOCKED", "protocol_bridge",
+      `Insufficient stock: ${holdResult.shortages.map((s) => `${s.sku} (wanted ${s.requested}, ${s.available} available)`).join(", ")}`,
+      { policy_decision: "BLOCKED" });
+    const result: CheckoutBridgeResult = {
+      status: "REJECTED",
+      httpStatus: 409,
+      reason: `Out of stock: ${holdResult.shortages.map((s) => `${s.sku} (wanted ${s.requested}, ${s.available} available)`).join(", ")}`,
+      session,
+    };
+    await saveIdempotentResult(merchantId, "checkout", idempotencyKey, result);
+    return result;
+  }
+
   const gate = await runGuardrailGate(merchantId, intent, paymentMethod);
 
   if (!gate.approved && !gate.requiresHumanApproval) {
     await transitionSession(merchantId, session.checkout_session_id, "BLOCKED", "protocol_bridge",
       `Guardrail policy check failed: ${gate.reasons.join("; ")}`, { policy_decision: "BLOCKED" });
+    await releaseHoldsForSession(merchantId, session.checkout_session_id, "Checkout blocked by guardrail policy", intent.intent_id);
     const result: CheckoutBridgeResult = {
       status: "REJECTED",
       httpStatus: 422,
@@ -521,9 +549,10 @@ export async function bridgeCheckout(
       },
     });
 
+    const paymentWindowExpiresAt = new Date(Date.now() + DEFAULT_HOLD_TTL_SEC * 1000).toISOString();
     await transitionSession(merchantId, session.checkout_session_id, "ORDER_CREATED", "protocol_bridge",
       `Razorpay Order ${(order as any).id} created in test mode`,
-      { razorpay_order_id: (order as any).id, order_status: "CREATED" });
+      { razorpay_order_id: (order as any).id, order_status: "CREATED", expires_at: paymentWindowExpiresAt });
 
     if (appliedCampaignId && appliedDiscountInr > 0) {
       await recordCampaignRedemption(merchantId, appliedCampaignId, appliedDiscountInr);
@@ -549,6 +578,7 @@ export async function bridgeCheckout(
     return result;
   } catch (err: any) {
     await transitionSession(merchantId, session.checkout_session_id, "CANCELLED", "protocol_bridge", `Razorpay order creation failed: ${err?.message ?? String(err)}`);
+    await releaseHoldsForSession(merchantId, session.checkout_session_id, `Razorpay order creation failed: ${err?.message ?? String(err)}`, intent.intent_id);
     const audit = await writeAudit(merchantId, {
       intent_id: intent.intent_id,
       step: "FAILURE",

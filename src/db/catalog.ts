@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "./client";
 import { products, bundleRules } from "./schema";
 
@@ -51,6 +51,21 @@ export async function updateProductPrice(merchantId: string, sku: string, priceI
   await db
     .update(products)
     .set({ priceInr, updatedAt: new Date() })
+    .where(and(eq(products.merchantId, merchantId), eq(products.sku, sku)));
+}
+
+/**
+ * Permanently decrements stock when a hold is converted into a real sale
+ * (payment actually captured — see services/inventory.ts#consumeHoldsForSession).
+ * Done as a single atomic `SET inventory_count = inventory_count - qty`
+ * rather than read-then-write, so concurrent consumptions can't race each
+ * other into an inconsistent count. Never goes below zero.
+ */
+export async function decrementInventory(merchantId: string, sku: string, qty: number): Promise<void> {
+  if (qty <= 0) return;
+  await db
+    .update(products)
+    .set({ inventoryCount: sql`GREATEST(${products.inventoryCount} - ${qty}, 0)`, updatedAt: new Date() })
     .where(and(eq(products.merchantId, merchantId), eq(products.sku, sku)));
 }
 

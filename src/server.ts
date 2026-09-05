@@ -63,6 +63,9 @@ import { getPublishedPolicy, getDraftPolicy, saveDraft, publishDraft, getPolicyH
 import { runTestSuite } from "./services/test_lab";
 import { simulateTestPayment } from "./services/dev_tools";
 import { assertDbReachable } from "./db/client";
+import { startBackgroundJobs, runSweepNow } from "./services/scheduler";
+import { listActiveHolds } from "./services/inventory";
+import { chatWithStorefrontAgent, ConversationTurn } from "./services/ai_storefront";
 
 const app = Fastify({ logger: true, trustProxy: true });
 
@@ -396,6 +399,49 @@ async function main() {
   });
 
   /* -------------------------------------------------------------- */
+  /* AI Storefront — real, LLM-backed conversational sales agent      */
+  /* (services/ai_storefront.ts). Distinct from the dashboard's        */
+  /* client-side "Buyer Simulator" demo. Agent-facing: an AI shopping  */
+  /* assistant on behalf of a human buyer talks to this the same way   */
+  /* it would talk to a person at checkout.                            */
+  /* -------------------------------------------------------------- */
+  app.post<{ Body: { message: string; conversation_id?: string; history?: ConversationTurn[]; cart_skus?: string[] } }>(
+    "/agent/v1/storefront/chat",
+    { preHandler: requireAgentAuth },
+    async (request, reply) => {
+      const { message, conversation_id, history, cart_skus } = request.body ?? ({} as any);
+      if (!message || typeof message !== "string") {
+        return reply.status(400).send({ error: "message is required" });
+      }
+      const result = await chatWithStorefrontAgent(
+        request.merchantId!,
+        message,
+        Array.isArray(history) ? history : [],
+        Array.isArray(cart_skus) ? cart_skus : [],
+        conversation_id
+      );
+      return result;
+    }
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Inventory holds — dashboard visibility into the reservation-hold  */
+  /* model (services/inventory.ts): every unit currently locked to an   */
+  /* in-flight checkout, and its lock timestamp.                       */
+  /* -------------------------------------------------------------- */
+  app.get("/agent/v1/inventory/holds", { preHandler: requireDashboardAuth }, async (request) => ({
+    holds: await listActiveHolds(request.merchantId!),
+  }));
+
+  /* Dashboard-only: run the expiry sweep on demand instead of waiting   */
+  /* for the next scheduled tick — useful for demoing the failure-      */
+  /* handling / rollback path without sitting through a real timeout.   */
+  app.post("/agent/v1/dev/run-expiry-sweep", { preHandler: requireDashboardAuth }, async () => {
+    await runSweepNow();
+    return { status: "OK" };
+  });
+
+  /* -------------------------------------------------------------- */
   /* Growth — Upsell & Cross-sell Agent + Revenue Opportunities       */
   /* (spec sections 21/23, Phase 7) — real acceptance-rate model,     */
   /* baseline-blended until enough live samples exist. Dashboard.     */
@@ -627,6 +673,11 @@ async function main() {
 
   const port = Number(process.env.PORT ?? 4000);
   await app.listen({ port, host: "0.0.0.0" });
+
+  // Background sweep: releases expired inventory holds and times out any
+  // checkout session whose payment window closed without a captured
+  // payment. See services/scheduler.ts.
+  startBackgroundJobs();
 }
 
 main().catch((err) => {

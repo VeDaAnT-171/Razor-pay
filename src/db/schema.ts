@@ -73,6 +73,43 @@ export const products = pgTable(
   ]
 );
 
+/**
+ * A reservation hold placed against a product's stock the moment a
+ * checkout session commits to buying it — NOT a permanent decrement of
+ * `products.inventory_count`. Available quantity for a SKU is always
+ * `inventory_count - SUM(quantity WHERE status='held')`, computed live
+ * (see services/inventory.ts) rather than cached, so there is no counter
+ * that can drift out of sync with reality.
+ *
+ * Lifecycle: held -> released (checkout blocked/rejected/cancelled/timed
+ * out — stock goes back to the pool) OR held -> consumed (payment really
+ * captured — inventory_count is permanently decremented and the hold is
+ * closed out). `expiresAt` is the lock timestamp: the background sweep
+ * in services/scheduler.ts releases any hold still `held` past this time,
+ * so a checkout that's abandoned mid-flight can never hold stock hostage
+ * forever.
+ */
+export const inventoryHolds = pgTable(
+  "inventory_holds",
+  {
+    id: text("id").primaryKey(),
+    merchantId: text("merchant_id").notNull(),
+    checkoutSessionId: text("checkout_session_id").notNull(),
+    sku: text("sku").notNull(),
+    quantity: integer("quantity").notNull(),
+    status: text("status").notNull(), // "held" | "released" | "consumed"
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolutionReason: text("resolution_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("inventory_holds_merchant_sku_idx").on(t.merchantId, t.sku),
+    index("inventory_holds_merchant_session_idx").on(t.merchantId, t.checkoutSessionId),
+    index("inventory_holds_status_expiry_idx").on(t.status, t.expiresAt),
+  ]
+);
+
 export const bundleRules = pgTable(
   "bundle_rules",
   {

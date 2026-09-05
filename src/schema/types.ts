@@ -203,6 +203,10 @@ export const AuditStep = z.enum([
   "IDEMPOTENT_REPLAY",
   "VELOCITY_CHECK",
   "CAMPAIGN_APPLIED",
+  "INVENTORY_HELD",
+  "INVENTORY_RELEASED",
+  "INVENTORY_CONSUMED",
+  "STOREFRONT_CONVERSATION",
 ]);
 export type AuditStep = z.infer<typeof AuditStep>;
 

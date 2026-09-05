@@ -16,6 +16,7 @@ import { randomUUID } from "crypto";
 import { getSession, transitionSession } from "./checkout_session";
 import { writeAudit } from "./audit_log";
 import { createRazorpayOrder } from "./razorpay_client";
+import { releaseHoldsForSession, DEFAULT_HOLD_TTL_SEC } from "./inventory";
 import * as repo from "../db/approvals";
 
 export interface ApprovalRecord {
@@ -91,6 +92,7 @@ export async function resolveApproval(
   if (action === "reject") {
     const updated = await repo.updateApproval(merchantId, approvalId, { status: "rejected", resolvedAt: new Date() });
     await transitionSession(merchantId, session.checkout_session_id, "REJECTED", "approvals", `Approval rejected by merchant${note ? `: ${note}` : ""}`);
+    await releaseHoldsForSession(merchantId, session.checkout_session_id, `Approval rejected by merchant${note ? `: ${note}` : ""}`, session.intent_id);
     await writeAudit(merchantId, {
       intent_id: session.intent_id, step: "APPROVAL_REJECTED", outcome: "FAIL", actor: "approvals",
       reason: `Approval ${approvalId} rejected${note ? `: ${note}` : ""}`, detail: { approval_id: approvalId },
@@ -132,15 +134,18 @@ export async function resolveApproval(
       receipt: session.intent_id,
       notes: { checkout_session_id: session.checkout_session_id, source: "human_approval", merchant_id: merchantId },
     });
+    const paymentWindowExpiresAt = new Date(Date.now() + DEFAULT_HOLD_TTL_SEC * 1000).toISOString();
     await transitionSession(merchantId, session.checkout_session_id, "ORDER_CREATED", "approvals",
       `Razorpay order ${(order as any).id} created after human approval`,
-      { razorpay_order_id: (order as any).id, order_status: "CREATED" });
+      { razorpay_order_id: (order as any).id, order_status: "CREATED", expires_at: paymentWindowExpiresAt });
     await writeAudit(merchantId, {
       intent_id: session.intent_id, step: "ORDER_CREATED", outcome: "PASS", actor: "approvals",
       reason: `Razorpay order ${(order as any).id} created for ₹${session.final_amount_inr} following approval`,
       detail: { razorpay_order_id: (order as any).id },
     });
   } catch (err: any) {
+    await transitionSession(merchantId, session.checkout_session_id, "CANCELLED", "approvals", `Razorpay order creation failed after approval: ${err?.message ?? String(err)}`);
+    await releaseHoldsForSession(merchantId, session.checkout_session_id, `Razorpay order creation failed after approval: ${err?.message ?? String(err)}`, session.intent_id);
     await writeAudit(merchantId, {
       intent_id: session.intent_id, step: "FAILURE", outcome: "FAIL", actor: "approvals",
       reason: `Razorpay order creation failed after approval: ${err?.message ?? String(err)}`,

@@ -2,7 +2,7 @@
  * src/db/sessions.ts — repository layer for `checkout_sessions`.
  */
 
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, or } from "drizzle-orm";
 import { db } from "./client";
 import { checkoutSessions } from "./schema";
 
@@ -90,6 +90,22 @@ export async function findSessionByOrderOrPaymentGlobal(orderId?: string, paymen
     .where(or(...conditions))
     .limit(1);
   return rows[0] as SessionRow | undefined;
+}
+
+/**
+ * Cross-tenant: every session whose `expiresAt` lock timestamp has
+ * passed while it's still sitting in a non-terminal, unpaid state —
+ * i.e. a payment window that ran out with nobody paying. Used only by
+ * the background sweep (services/scheduler.ts), which — like
+ * `findSessionByOrderOrPaymentGlobal` above — has no single merchant's
+ * request context to scope by.
+ */
+export async function findExpiredActiveSessions(now: Date): Promise<SessionRow[]> {
+  const nonTerminal = ["ORDER_CREATED", "PAYMENT_INITIATED", "PAYMENT_AUTHORIZED", "PAYMENT_FAILED"];
+  return (await db
+    .select()
+    .from(checkoutSessions)
+    .where(and(lt(checkoutSessions.expiresAt, now), inArray(checkoutSessions.state, nonTerminal)))) as SessionRow[];
 }
 
 export async function listSessions(merchantId: string): Promise<SessionRow[]> {

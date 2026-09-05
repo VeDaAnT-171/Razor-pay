@@ -180,6 +180,7 @@ export type SessionPatch = Partial<
     | "simulated_payment"
     | "audit_id"
     | "campaign_id"
+    | "expires_at"
   >
 >;
 
@@ -200,6 +201,7 @@ function patchToRow(patch: SessionPatch): Partial<repo.SessionRow> {
   if (patch.simulated_payment !== undefined) out.simulatedPayment = patch.simulated_payment;
   if (patch.audit_id !== undefined) out.auditId = patch.audit_id;
   if (patch.campaign_id !== undefined) out.campaignId = patch.campaign_id;
+  if (patch.expires_at !== undefined) out.expiresAt = patch.expires_at ? new Date(patch.expires_at) : null;
   return out;
 }
 
